@@ -44,3 +44,19 @@ def test_agent_list_wiki():
     
     tools_used = [tc["tool"] for tc in output["tool_calls"]]
     assert "list_files" in tools_used, "Agent did not use list_files tool"
+
+# Task 3 Test: Source Code Read Logic
+def test_agent_system_framework():
+    output = run_agent("What framework does the backend use?")
+    assert len(output.get("tool_calls", [])) > 0, "No tool calls were made"
+    
+    tools_used = [tc["tool"] for tc in output["tool_calls"]]
+    assert "read_file" in tools_used, "Agent did not use read_file tool"
+
+# Task 3 Test: Query API Logic
+def test_agent_system_db_count():
+    output = run_agent("How many items are in the database?")
+    assert len(output.get("tool_calls", [])) > 0, "No tool calls were made"
+    
+    tools_used = [tc["tool"] for tc in output["tool_calls"]]
+    assert "query_api" in tools_used, "Agent did not use query_api tool"
