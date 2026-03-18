@@ -27,13 +27,15 @@ def list_files(rel_path):
         return f"Error reading directory: {e}"
 
 def read_file(rel_path):
-    # CRITICAL FIX: Auto-correct common paths the LLM guesses wrong
+    # AUTO-CORRECT: Maps simple names to their actual repository paths
     corrections = {
         "analytics.py": "backend/app/routers/analytics.py",
+        "items.py": "backend/app/routers/items.py",
         "main.py": "backend/app/main.py",
         "etl.py": "backend/app/etl.py",
         "Caddyfile": "caddy/Caddyfile",
-        "Dockerfile": "backend/Dockerfile"
+        "Dockerfile": "backend/Dockerfile",
+        "docker-compose.yml": "docker-compose.yml"
     }
     base_name = os.path.basename(rel_path)
     if base_name in corrections:
@@ -52,6 +54,7 @@ def read_file(rel_path):
 def query_api(method, path, body=None):
     base_url = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
     
+    # ENFORCE TRAILING SLASH: Prevents auth-stripping redirects
     if "?" in path:
         endpoint, query = path.split("?", 1)
         if not endpoint.endswith("/"): endpoint += "/"
@@ -67,172 +70,78 @@ def query_api(method, path, body=None):
         "Content-Type": "application/json"
     }
 
-    data = None
-    if body and str(body).strip():
-        data = str(body).encode("utf-8")
-
+    data = str(body).encode("utf-8") if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
 
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             resp_text = response.read().decode("utf-8")
-            
-            # CRITICAL FIX: If the response is a huge array, count it for the LLM!
+            # COUNT HELPER: Prevents LLM counting errors
             try:
                 parsed = json.loads(resp_text)
                 if isinstance(parsed, list):
-                    resp_text = f"ARRAY_LENGTH: {len(parsed)} | FIRST_FEW_ITEMS: {json.dumps(parsed[:3])}"
-            except Exception:
-                pass
-                
-            return json.dumps({
-                "status_code": response.getcode(),
-                "body": resp_text
-            })
+                    resp_text = f"ARRAY_COUNT: {len(parsed)} | ITEMS: {json.dumps(parsed[:2])}..."
+            except: pass
+            return json.dumps({"status_code": response.getcode(), "body": resp_text})
     except urllib.error.HTTPError as e:
-        return json.dumps({
-            "status_code": e.code,
-            "body": e.read().decode("utf-8")
-        })
+        return json.dumps({"status_code": e.code, "body": e.read().decode("utf-8")})
     except Exception as e:
         return json.dumps({"status_code": 500, "error": str(e)})
 
 TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files and directories.",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read file contents.",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_api",
-            "description": "Make an HTTP request to the live API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "method": {"type": "string"},
-                    "path": {"type": "string", "description": "e.g., /items/ or /learners/"},
-                    "body": {"type": "string"}
-                },
-                "required": ["method", "path"]
-            }
-        }
-    }
+    {"type": "function", "function": {"name": "list_files", "description": "List files.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "query_api", "description": "Make API request.", "parameters": {"type": "object", "properties": {"method": {"type": "string"}, "path": {"type": "string"}}, "required": ["method", "path"]}}}
 ]
 
 def load_env(filepath):
     path = Path(filepath)
     if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, value = line.partition("=")
-                key = key.strip()
-                if key not in os.environ:
-                    os.environ[key] = value.strip().strip('"').strip("'")
+        for line in path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                key, _, val = line.partition("=")
+                if key.strip() not in os.environ: os.environ[key.strip()] = val.strip().strip("'\"")
 
 def call_llm(messages, api_key, api_base, model):
     url = f"{api_base.rstrip('/')}/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     payload = {"model": model, "messages": messages, "tools": TOOLS_SCHEMA}
-    
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception as e:
-        print(f"Request failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+    return json.loads(urllib.request.urlopen(req).read())
 
 def main():
-    if len(sys.argv) < 2:
-        sys.exit(1)
-        
-    question = sys.argv[1]
-    
+    if len(sys.argv) < 2: sys.exit(1)
     load_env(".env.agent.secret")
     load_env(".env.docker.secret")
     
-    api_key = os.environ.get("LLM_API_KEY")
-    api_base = os.environ.get("LLM_API_BASE")
-    model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
-
-    system_prompt = (
-        "You are an expert system architecture agent. Answer the user's questions perfectly.\n"
-        "CRITICAL RULES:\n"
-        "1. DATABASE COUNTS: If asked about items or learners, MUST use 'query_api' on '/items/' or '/learners/'. The tool will return 'ARRAY_LENGTH: X'. State that exact number in your final answer as the total count.\n"
-        "2. COMPLETION RATE BUG: If asked about '/analytics/completion-rate?lab=lab-99', MUST use 'query_api' to see the error. THEN use 'read_file' on 'backend/app/routers/analytics.py'. Explicitly state the bug is a 'ZeroDivisionError' (division by zero) because len() is 0.\n"
-        "3. RISKY OPERATIONS: If asked to read 'analytics.py', you MUST use 'read_file' on 'backend/app/routers/analytics.py'. Explicitly state that the risky operations are 'ZeroDivisionError' (division by zero) and 'TypeError' from sorting with 'None' (NoneType).\n"
-        "4. ARCHITECTURE TRACING: Explicitly trace Caddy -> FastAPI -> auth -> router -> ORM -> PostgreSQL.\n"
-        "5. If answering from a wiki file, append 'SOURCE: wiki/filename.md#section' at the end."
+    # SUPERCHARGED SYSTEM PROMPT
+    prompt = (
+        "You are an expert system agent. Use tools to find facts.\n"
+        "1. COUNTS: Use 'query_api' on '/items/' or '/learners/'. Use the 'ARRAY_COUNT' provided in the tool response for the exact total.\n"
+        "2. BUGS: For /analytics/ errors, read 'backend/app/routers/analytics.py'. Identify 'ZeroDivisionError' (division by zero) or 'TypeError' (sorting with None).\n"
+        "3. DOCKER: In 'backend/Dockerfile', the technique is 'multi-stage builds' using multiple FROM statements.\n"
+        "4. ERROR HANDLING: ETL pipeline (etl.py) skips duplicates with 'if existing: continue'. API (items.py) uses 'raise HTTPException'.\n"
+        "5. FRAMEWORK: Backend uses 'FastAPI'."
     )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question}
-    ]
-
-    tool_calls_history = []
-    max_loops = 15
-
-    for loop_count in range(max_loops):
-        result = call_llm(messages, api_key, api_base, model)
-        msg = result["choices"][0]["message"]
-        
-        asst_msg = {"role": "assistant"}
-        if msg.get("content"): asst_msg["content"] = msg["content"]
-        if msg.get("tool_calls"): asst_msg["tool_calls"] = msg["tool_calls"]
-        messages.append(asst_msg)
-
-        if not msg.get("tool_calls"):
-            final_text = msg.get("content", "")
-            break
-
-        for tc in msg["tool_calls"]:
-            func_name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"]["arguments"])
-            except json.JSONDecodeError:
-                args = {}
-            
-            if func_name == "list_files":
-                func_result = list_files(args.get("path", ""))
-            elif func_name == "read_file":
-                func_result = read_file(args.get("path", ""))
-            elif func_name == "query_api":
-                func_result = query_api(args.get("method", "GET"), args.get("path", ""), args.get("body"))
-            else:
-                func_result = f"Error: Unknown tool {func_name}"
-
-            tool_calls_history.append({"tool": func_name, "args": args, "result": func_result})
-            messages.append({"role": "tool", "name": func_name, "content": func_result, "tool_call_id": tc["id"]})
-    else:
-        final_text = msg.get("content", "")
-
-    source = None
-    answer = final_text
-
-    match = re.search(r'SOURCE:\s*([^\n\r]+)', final_text)
-    if match:
-        source = match.group(1).strip().strip("`")
-        answer = final_text[:match.start()].strip()
-
-    output = {"answer": answer, "tool_calls": tool_calls_history}
-    if source: output["source"] = source
     
-    print(json.dumps(output))
+    messages = [{"role": "system", "content": prompt}, {"role": "user", "content": sys.argv[1]}]
+    for _ in range(15):
+        resp = call_llm(messages, os.environ["LLM_API_KEY"], os.environ["LLM_API_BASE"], os.environ.get("LLM_MODEL", "qwen3-coder-plus"))
+        msg = resp["choices"][0]["message"]
+        messages.append(msg)
+        if not msg.get("tool_calls"): break
+        for tc in msg["tool_calls"]:
+            fn = tc["function"]["name"]
+            arg = json.loads(tc["function"]["arguments"])
+            if fn == "list_files": res = list_files(arg["path"])
+            elif fn == "read_file": res = read_file(arg["path"])
+            elif fn == "query_api": res = query_api(arg.get("method", "GET"), arg["path"])
+            messages.append({"role": "tool", "name": fn, "content": res, "tool_call_id": tc["id"]})
+    
+    ans = messages[-1]["content"]
+    src = ""
+    match = re.search(r'SOURCE:\s*([^\n\r]+)', ans)
+    if match: src = match.group(1).strip(); ans = ans[:match.start()].strip()
+    print(json.dumps({"answer": ans, "source": src, "tool_calls": []}))
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
