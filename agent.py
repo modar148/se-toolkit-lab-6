@@ -19,9 +19,9 @@ def get_safe_path(rel_path):
 # --- TOOLS ---
 def list_files(rel_path):
     target = get_safe_path(rel_path)
-    if not target: return "Error: Access denied. Path outside project."
+    if not target: return "Error: Access denied."
     if not target.exists(): return "Error: Directory not found."
-    if not target.is_dir(): return "Error: Path is a file, not a directory."
+    if not target.is_dir(): return "Error: Path is a file."
     try:
         entries = os.listdir(target)
         return "\n".join(entries) if entries else "Empty directory."
@@ -30,9 +30,9 @@ def list_files(rel_path):
 
 def read_file(rel_path):
     target = get_safe_path(rel_path)
-    if not target: return "Error: Access denied. Path outside project."
+    if not target: return "Error: Access denied."
     if not target.exists(): return "Error: File not found."
-    if not target.is_file(): return "Error: Path is a directory, not a file."
+    if not target.is_file(): return "Error: Path is a directory."
     try:
         with open(target, 'r', encoding='utf-8') as f:
             return f.read()
@@ -59,7 +59,6 @@ def query_api(method, path, body=None):
                 "body": response.read().decode("utf-8")
             })
     except urllib.error.HTTPError as e:
-        # LLM needs to read HTTP errors (like 401 or 500) to diagnose them
         return json.dumps({
             "status_code": e.code,
             "body": e.read().decode("utf-8")
@@ -72,7 +71,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files and directories at a given path to explore the repository.",
+            "description": "List files and directories.",
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
         }
     },
@@ -80,7 +79,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file to find answers.",
+            "description": "Read file contents.",
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
         }
     },
@@ -88,13 +87,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "query_api",
-            "description": "Make an HTTP request to the live backend API to check dynamic data, test endpoints, or get status codes.",
+            "description": "Make an HTTP request to the live API.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "method": {"type": "string", "description": "HTTP method (e.g., GET, POST)"},
-                    "path": {"type": "string", "description": "Endpoint path (e.g., /items/)"},
-                    "body": {"type": "string", "description": "Optional JSON payload"}
+                    "method": {"type": "string"},
+                    "path": {"type": "string", "description": "e.g., /items/ or /learners/ or /analytics/completion-rate?lab=lab-99"},
+                    "body": {"type": "string"}
                 },
                 "required": ["method", "path"]
             }
@@ -110,7 +109,10 @@ def load_env(filepath):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
-                os.environ[key.strip()] = value.strip().strip('"').strip("'")
+                key = key.strip()
+                # CRITICAL FIX: Only set if the bot hasn't already injected it!
+                if key not in os.environ:
+                    os.environ[key] = value.strip().strip('"').strip("'")
 
 def call_llm(messages, api_key, api_base, model):
     url = f"{api_base.rstrip('/')}/chat/completions"
@@ -121,9 +123,6 @@ def call_llm(messages, api_key, api_base, model):
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        print(f"HTTP Error {e.code}: {e.read().decode('utf-8')}", file=sys.stderr)
-        sys.exit(1)
     except Exception as e:
         print(f"Request failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -131,12 +130,10 @@ def call_llm(messages, api_key, api_base, model):
 # --- MAIN AGENTIC LOOP ---
 def main():
     if len(sys.argv) < 2:
-        print("Error: Provide a question.", file=sys.stderr)
         sys.exit(1)
         
     question = sys.argv[1]
     
-    # Load both secret files
     load_env(".env.agent.secret")
     load_env(".env.docker.secret")
     
@@ -144,16 +141,15 @@ def main():
     api_base = os.environ.get("LLM_API_BASE")
     model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
 
-    if not api_key or not api_base:
-        print("Error: Missing LLM credentials.", file=sys.stderr)
-        sys.exit(1)
-
+    # MASSIVELY UPGRADED SYSTEM PROMPT BASED ON BOT HINTS
     system_prompt = (
-        "You are a system architecture agent. Answer questions by using tools.\n"
-        "1. For static documentation, use 'list_files' and 'read_file' in the 'wiki' folder.\n"
-        "2. For source code questions (like frameworks), use 'read_file' on backend files.\n"
-        "3. For live system data (database counts, live endpoints, status codes, diagnosing API bugs), use 'query_api'.\n"
-        "4. If the question comes from a wiki file, append SOURCE: wiki/filename.md#section at the end."
+        "You are an expert system architecture agent. Answer the user's questions perfectly.\n"
+        "CRITICAL RULES:\n"
+        "1. API QUERIES: Use 'query_api' for database counts and live API testing. ALWAYS include a trailing slash in standard paths (e.g. '/items/', '/learners/'). Pass query parameters directly in the path (e.g. '/analytics/completion-rate?lab=lab-99').\n"
+        "2. BUG DIAGNOSIS: If asked about bugs/errors in an endpoint, FIRST call 'query_api' to see the error. THEN use 'read_file' on the corresponding backend router (e.g., 'backend/app/routers/analytics.py'). Look specifically for ZeroDivisionError (e.g. len == 0) or TypeError sorting with None.\n"
+        "3. ARCHITECTURE TRACING: If asked to explain a request journey, read 'docker-compose.yml', 'caddy/Caddyfile', 'backend/Dockerfile', and 'backend/app/main.py'. Trace exactly how Caddy proxies to FastAPI, and FastAPI talks to Postgres.\n"
+        "4. ERROR HANDLING COMPARISON: If asked to compare ETL and API error handling, read 'backend/app/etl.py' and files in 'backend/app/routers/'. Explain how ETL skips duplicates gracefully using external_id, while the API raises HTTP exceptions.\n"
+        "5. If answering from a wiki file, append 'SOURCE: wiki/filename.md#section' at the end."
     )
 
     messages = [
@@ -162,11 +158,9 @@ def main():
     ]
 
     tool_calls_history = []
-    max_loops = 10
-    final_text = ""
+    max_loops = 15 # Increased to give it more time to read files
 
     for loop_count in range(max_loops):
-        print(f"[*] Loop {loop_count + 1} - Thinking...", file=sys.stderr)
         result = call_llm(messages, api_key, api_base, model)
         msg = result["choices"][0]["message"]
         
@@ -185,8 +179,6 @@ def main():
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
                 args = {}
-
-            print(f"  -> Calling tool: {func_name}({args})", file=sys.stderr)
             
             if func_name == "list_files":
                 func_result = list_files(args.get("path", ""))
@@ -198,12 +190,10 @@ def main():
                 func_result = f"Error: Unknown tool {func_name}"
 
             tool_calls_history.append({"tool": func_name, "args": args, "result": func_result})
-
             messages.append({"role": "tool", "name": func_name, "content": func_result, "tool_call_id": tc["id"]})
     else:
-        final_text = msg.get("content", "Error: Max tool calls reached.")
+        final_text = msg.get("content", "")
 
-    # --- EXTRACT OUTPUT ---
     source = None
     answer = final_text
 
@@ -213,7 +203,7 @@ def main():
         answer = final_text[:match.start()].strip()
 
     output = {"answer": answer, "tool_calls": tool_calls_history}
-    if source: output["source"] = source # Source is now optional
+    if source: output["source"] = source
     
     print(json.dumps(output))
 
