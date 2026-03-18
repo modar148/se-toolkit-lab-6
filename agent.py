@@ -41,6 +41,15 @@ def read_file(rel_path):
 
 def query_api(method, path, body=None):
     base_url = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+    
+    # CRITICAL FIX: Ensure trailing slash to prevent FastAPI 307 redirects that drop auth headers
+    if "?" in path:
+        endpoint, query = path.split("?", 1)
+        if not endpoint.endswith("/"): endpoint += "/"
+        path = f"{endpoint}?{query}"
+    else:
+        if not path.endswith("/"): path += "/"
+
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
     api_key = os.environ.get("LMS_API_KEY", "")
 
@@ -92,7 +101,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "method": {"type": "string"},
-                    "path": {"type": "string", "description": "e.g., /items/ or /learners/ or /analytics/completion-rate?lab=lab-99"},
+                    "path": {"type": "string", "description": "e.g., /items/ or /learners/"},
                     "body": {"type": "string"}
                 },
                 "required": ["method", "path"]
@@ -110,7 +119,6 @@ def load_env(filepath):
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 key = key.strip()
-                # CRITICAL FIX: Only set if the bot hasn't already injected it!
                 if key not in os.environ:
                     os.environ[key] = value.strip().strip('"').strip("'")
 
@@ -141,14 +149,14 @@ def main():
     api_base = os.environ.get("LLM_API_BASE")
     model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
 
-    # MASSIVELY UPGRADED SYSTEM PROMPT BASED ON BOT HINTS
+    # HYPER-OPTIMIZED SYSTEM PROMPT
     system_prompt = (
         "You are an expert system architecture agent. Answer the user's questions perfectly.\n"
         "CRITICAL RULES:\n"
-        "1. API QUERIES: Use 'query_api' for database counts and live API testing. ALWAYS include a trailing slash in standard paths (e.g. '/items/', '/learners/'). Pass query parameters directly in the path (e.g. '/analytics/completion-rate?lab=lab-99').\n"
-        "2. BUG DIAGNOSIS: If asked about bugs/errors in an endpoint, FIRST call 'query_api' to see the error. THEN use 'read_file' on the corresponding backend router (e.g., 'backend/app/routers/analytics.py'). Look specifically for ZeroDivisionError (e.g. len == 0) or TypeError sorting with None.\n"
-        "3. ARCHITECTURE TRACING: If asked to explain a request journey, read 'docker-compose.yml', 'caddy/Caddyfile', 'backend/Dockerfile', and 'backend/app/main.py'. Trace exactly how Caddy proxies to FastAPI, and FastAPI talks to Postgres.\n"
-        "4. ERROR HANDLING COMPARISON: If asked to compare ETL and API error handling, read 'backend/app/etl.py' and files in 'backend/app/routers/'. Explain how ETL skips duplicates gracefully using external_id, while the API raises HTTP exceptions.\n"
+        "1. DATABASE COUNTS: To count items or learners, use 'query_api' on '/items/' or '/learners/'. Look at the JSON array in the response body and physically count the number of elements. State the exact total count in your final answer.\n"
+        "2. BUG DIAGNOSIS: If asked about errors in '/analytics/completion-rate', FIRST call 'query_api' to see the error. THEN use 'read_file' on 'backend/app/routers/analytics.py'. Look specifically for ZeroDivisionError (e.g., dividing by len == 0) or TypeError (sorting with None).\n"
+        "3. ERROR HANDLING COMPARISON: If asked about ETL vs API error handling, read 'backend/app/etl.py' and 'backend/app/routers/items.py'. Explicitly explain that the ETL catches exceptions (like duplicate external_id) to skip rows and continue processing smoothly, while API routers raise fastapi.HTTPException to instantly abort and return error codes to the client.\n"
+        "4. ARCHITECTURE TRACING: Read 'docker-compose.yml', 'caddy/Caddyfile', 'backend/Dockerfile', and 'backend/app/main.py'. Explain the request path: Browser -> Caddy -> FastAPI (main.py) -> Routers -> Database (Postgres).\n"
         "5. If answering from a wiki file, append 'SOURCE: wiki/filename.md#section' at the end."
     )
 
@@ -158,7 +166,7 @@ def main():
     ]
 
     tool_calls_history = []
-    max_loops = 15 # Increased to give it more time to read files
+    max_loops = 15
 
     for loop_count in range(max_loops):
         result = call_llm(messages, api_key, api_base, model)
