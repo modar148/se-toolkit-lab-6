@@ -1,19 +1,21 @@
-# Agent Documentation
+# Documentation Agent
 
 ## Overview
-This is a lightweight CLI agent built in Python. It accepts a question via the command line, sends it to a Large Language Model, and returns a structured JSON answer containing an `answer` string and an empty `tool_calls` list.
+This is an autonomous CLI agent built in Python that navigates the project repository to answer user questions based on actual documentation files.
 
 ## Architecture
-- **Language:** Python 3 (using standard libraries like `urllib`).
-- **LLM Provider:** Qwen Code API (hosted locally on the remote VM via `qwen-code-oai-proxy`).
+- **Language:** Python 3 (using standard libraries).
+- **LLM Provider:** Qwen Code API (hosted locally on the remote VM).
 - **Model:** `qwen3-coder-plus`.
-- **Environment:** Secrets are loaded safely from `.env.agent.secret`.
 
-## Usage
-Run the agent using `uv`:
-`uv run agent.py "What does REST stand for?"`
+## Agentic Loop
+The agent runs in a `while` loop (capped at 10 iterations to prevent infinite looping).
+1. The user's question and a strict system prompt are sent to the LLM.
+2. If the LLM requests a tool call, the local Python script executes it, appends the result as a `role: tool` message, and loops back to the LLM.
+3. Once the LLM has enough information, it generates a standard text response ending with a structured `SOURCE:` tag.
+4. The script parses the final text, extracts the answer and source, and outputs a strict JSON payload.
 
-## Data Flow
-1. **Input:** Arguments are parsed from `sys.argv`.
-2. **Processing:** An HTTP POST request is dispatched to the OpenAI-compatible `/v1/chat/completions` endpoint.
-3. **Output:** The agent extracts the generated text and prints strict, parseable JSON to `stdout`. All error handling is routed to `stderr`.
+## Secure Tools
+- `list_files(path)`: Lists directory contents.
+- `read_file(path)`: Returns file contents.
+- **Security:** Both tools use absolute path resolution (`pathlib.Path.resolve()`) and strictly verify that the requested target path `.startswith()` the project root directory. Any attempt to use `../` to escape the repository boundary results in a hardcoded access denied error fed back to the LLM.

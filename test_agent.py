@@ -2,33 +2,45 @@ import json
 import subprocess
 import sys
 
-def test_agent_basic_output():
-    """
-    Test that agent.py returns valid JSON with 'answer' and 'tool_calls'
-    when given a basic question.
-    """
-    question = "What does HTML stand for?"
-    
-    # Run the agent as a subprocess
+def run_agent(question):
     result = subprocess.run(
         [sys.executable, "agent.py", question],
         capture_output=True,
         text=True,
-        timeout=30
+        timeout=60
     )
-    
-    # Ensure the script exited successfully
     assert result.returncode == 0, f"Agent failed with stderr: {result.stderr}"
-    
-    # Parse the stdout as JSON
     try:
-        output_data = json.loads(result.stdout.strip())
+        return json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         assert False, f"Output is not valid JSON. stdout was: {result.stdout}"
-        
-    # Check for the required keys
-    assert "answer" in output_data, "Missing 'answer' key in JSON output"
-    assert "tool_calls" in output_data, "Missing 'tool_calls' key in JSON output"
+
+# Task 1 Test
+def test_agent_basic_output():
+    output = run_agent("What does HTML stand for?")
+    assert "answer" in output, "Missing 'answer' key"
+    assert "tool_calls" in output, "Missing 'tool_calls' key"
+
+# Task 2 Test: Read File Logic
+def test_agent_merge_conflict():
+    output = run_agent("How do you resolve a merge conflict?")
     
-    # Check that tool_calls is a list
-    assert isinstance(output_data["tool_calls"], list), "'tool_calls' should be a list"
+    # Check that tool calls were made
+    assert len(output.get("tool_calls", [])) > 0, "No tool calls were made"
+    
+    # Check if read_file was used
+    tools_used = [tc["tool"] for tc in output["tool_calls"]]
+    assert "read_file" in tools_used, "Agent did not use read_file tool"
+    
+    # Check if the source is correct
+    source = output.get("source", "")
+    assert "wiki/git" in source, f"Incorrect source found: {source}"
+
+# Task 2 Test: List Files Logic
+def test_agent_list_wiki():
+    output = run_agent("What files are in the wiki?")
+    
+    assert len(output.get("tool_calls", [])) > 0, "No tool calls were made"
+    
+    tools_used = [tc["tool"] for tc in output["tool_calls"]]
+    assert "list_files" in tools_used, "Agent did not use list_files tool"
