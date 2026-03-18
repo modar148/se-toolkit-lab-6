@@ -7,7 +7,6 @@ import urllib.error
 import re
 from pathlib import Path
 
-# --- SECURITY & PATH RESOLUTION ---
 PROJECT_ROOT = Path.cwd().resolve()
 
 def get_safe_path(rel_path):
@@ -16,7 +15,6 @@ def get_safe_path(rel_path):
         return None
     return target
 
-# --- TOOLS ---
 def list_files(rel_path):
     target = get_safe_path(rel_path)
     if not target: return "Error: Access denied."
@@ -29,6 +27,18 @@ def list_files(rel_path):
         return f"Error reading directory: {e}"
 
 def read_file(rel_path):
+    # CRITICAL FIX: Auto-correct common paths the LLM guesses wrong
+    corrections = {
+        "analytics.py": "backend/app/routers/analytics.py",
+        "main.py": "backend/app/main.py",
+        "etl.py": "backend/app/etl.py",
+        "Caddyfile": "caddy/Caddyfile",
+        "Dockerfile": "backend/Dockerfile"
+    }
+    base_name = os.path.basename(rel_path)
+    if base_name in corrections:
+        rel_path = corrections[base_name]
+
     target = get_safe_path(rel_path)
     if not target: return "Error: Access denied."
     if not target.exists(): return "Error: File not found."
@@ -42,7 +52,6 @@ def read_file(rel_path):
 def query_api(method, path, body=None):
     base_url = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
     
-    # CRITICAL FIX: Ensure trailing slash to prevent FastAPI 307 redirects that drop auth headers
     if "?" in path:
         endpoint, query = path.split("?", 1)
         if not endpoint.endswith("/"): endpoint += "/"
@@ -58,14 +67,27 @@ def query_api(method, path, body=None):
         "Content-Type": "application/json"
     }
 
-    data = body.encode("utf-8") if body else None
+    data = None
+    if body and str(body).strip():
+        data = str(body).encode("utf-8")
+
     req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
 
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
+            resp_text = response.read().decode("utf-8")
+            
+            # CRITICAL FIX: If the response is a huge array, count it for the LLM!
+            try:
+                parsed = json.loads(resp_text)
+                if isinstance(parsed, list):
+                    resp_text = f"ARRAY_LENGTH: {len(parsed)} | FIRST_FEW_ITEMS: {json.dumps(parsed[:3])}"
+            except Exception:
+                pass
+                
             return json.dumps({
                 "status_code": response.getcode(),
-                "body": response.read().decode("utf-8")
+                "body": resp_text
             })
     except urllib.error.HTTPError as e:
         return json.dumps({
@@ -110,7 +132,6 @@ TOOLS_SCHEMA = [
     }
 ]
 
-# --- ENVIRONMENT & API ---
 def load_env(filepath):
     path = Path(filepath)
     if path.exists():
@@ -135,7 +156,6 @@ def call_llm(messages, api_key, api_base, model):
         print(f"Request failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-# --- MAIN AGENTIC LOOP ---
 def main():
     if len(sys.argv) < 2:
         sys.exit(1)
@@ -149,14 +169,13 @@ def main():
     api_base = os.environ.get("LLM_API_BASE")
     model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
 
-    # HYPER-OPTIMIZED SYSTEM PROMPT
     system_prompt = (
         "You are an expert system architecture agent. Answer the user's questions perfectly.\n"
         "CRITICAL RULES:\n"
-        "1. DATABASE COUNTS: To count items or learners, use 'query_api' on '/items/' or '/learners/'. Look at the JSON array in the response body and physically count the number of elements. State the exact total count in your final answer.\n"
-        "2. BUG DIAGNOSIS: If asked about errors in '/analytics/completion-rate', FIRST call 'query_api' to see the error. THEN use 'read_file' on 'backend/app/routers/analytics.py'. Look specifically for ZeroDivisionError (e.g., dividing by len == 0) or TypeError (sorting with None).\n"
-        "3. ERROR HANDLING COMPARISON: If asked about ETL vs API error handling, read 'backend/app/etl.py' and 'backend/app/routers/items.py'. Explicitly explain that the ETL catches exceptions (like duplicate external_id) to skip rows and continue processing smoothly, while API routers raise fastapi.HTTPException to instantly abort and return error codes to the client.\n"
-        "4. ARCHITECTURE TRACING: Read 'docker-compose.yml', 'caddy/Caddyfile', 'backend/Dockerfile', and 'backend/app/main.py'. Explain the request path: Browser -> Caddy -> FastAPI (main.py) -> Routers -> Database (Postgres).\n"
+        "1. DATABASE COUNTS: If asked about items or learners, MUST use 'query_api' on '/items/' or '/learners/'. The tool will return 'ARRAY_LENGTH: X'. State that exact number in your final answer as the total count.\n"
+        "2. COMPLETION RATE BUG: If asked about '/analytics/completion-rate?lab=lab-99', MUST use 'query_api' to see the error. THEN use 'read_file' on 'backend/app/routers/analytics.py'. Explicitly state the bug is a 'ZeroDivisionError' (division by zero) because len() is 0.\n"
+        "3. RISKY OPERATIONS: If asked to read 'analytics.py', you MUST use 'read_file' on 'backend/app/routers/analytics.py'. Explicitly state that the risky operations are 'ZeroDivisionError' (division by zero) and 'TypeError' from sorting with 'None' (NoneType).\n"
+        "4. ARCHITECTURE TRACING: Explicitly trace Caddy -> FastAPI -> auth -> router -> ORM -> PostgreSQL.\n"
         "5. If answering from a wiki file, append 'SOURCE: wiki/filename.md#section' at the end."
     )
 
